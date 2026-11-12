@@ -1,6 +1,9 @@
 package com.maxrave.media3.ui
 
 import android.app.PictureInPictureParams
+import com.maxrave.common.PlaybackPlatformPolicy
+import com.maxrave.common.isTelevisionDevice
+import android.content.pm.PackageManager
 import android.content.Context
 import android.os.Build
 import androidx.activity.ComponentActivity
@@ -129,7 +132,7 @@ fun MediaPlayerView(
                 CacheDataSource
                     .Factory()
                     .setCache(canvasCache)
-                    .setCacheWriteDataSinkFactory(cacheSink)
+                    .setCacheWriteDataSinkFactory(if (PlaybackPlatformPolicy.forDevice(context.isTelevisionDevice()).canvasDiskWrites) cacheSink else null)
                     .setCacheReadDataSourceFactory(downStreamFactory)
                     .setUpstreamDataSourceFactory(upstreamFactory)
                     .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
@@ -254,6 +257,11 @@ fun MediaPlayerViewWithSubtitle(
     mainTextStyle: TextStyle,
     translatedTextStyle: TextStyle,
 ) {
+    val pipAllowed = PlaybackPlatformPolicy.forDevice(context.isTelevisionDevice()).allowPip(
+        requested = shouldPip,
+        api = Build.VERSION.SDK_INT,
+        supported = context.packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE),
+    )
     val player: Player = koinInject(named(playerName))
 
     // Subtitles over the video are lyrics like any other, so they take the same audio-delay
@@ -373,18 +381,18 @@ fun MediaPlayerViewWithSubtitle(
 
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
                     super.onIsPlayingChanged(isPlaying)
-                    shouldEnterPipMode = isPlaying && shouldPip
+                    shouldEnterPipMode = isPlaying && pipAllowed
                 }
             }
         }
 
     DisposableEffect(Unit) {
-        shouldEnterPipMode = shouldPip
+        shouldEnterPipMode = pipAllowed
         onDispose {
             shouldEnterPipMode = false
             player.removeListener(playerListener)
             Logger.w("MediaPlayerView", "Disposing ExoPlayer")
-            if (shouldPip && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (pipAllowed && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 val builder = PictureInPictureParams.Builder()
 
                 // Add autoEnterEnabled for versions S and up
@@ -408,7 +416,7 @@ fun MediaPlayerViewWithSubtitle(
         Logger.w("MediaPlayerView", "shouldEnterPipMode: $shouldEnterPipMode")
     }
 
-    if (shouldPip && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+    if (pipAllowed && Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
         val currentShouldEnterPipMode by rememberUpdatedState(newValue = shouldEnterPipMode)
         DisposableEffect(context) {
             val onUserLeaveBehavior =
@@ -432,7 +440,7 @@ fun MediaPlayerViewWithSubtitle(
         modifier =
             modifier
                 .then(
-                    if (shouldPip && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    if (pipAllowed && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                         Modifier.onGloballyPositioned { layoutCoordinates ->
                             val builder = PictureInPictureParams.Builder()
 

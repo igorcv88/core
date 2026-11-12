@@ -1,5 +1,7 @@
 package com.maxrave.media3.service.download
 
+import com.maxrave.common.PlaybackPlatformPolicy
+import com.maxrave.common.isTelevisionDevice
 import android.content.Context
 import androidx.core.net.toUri
 import androidx.media3.common.util.UnstableApi
@@ -63,6 +65,11 @@ internal class DownloadUtils(
             CacheDataSource
                 .Factory()
                 .setCache(playerCache)
+                .apply {
+                    if (!PlaybackPlatformPolicy.forDevice(context.isTelevisionDevice()).streamingDiskWrites) {
+                        setCacheWriteDataSinkFactory(null)
+                    }
+                }
                 .setUpstreamDataSourceFactory(
                     OkHttpDataSource.Factory(
                         OkHttpClient

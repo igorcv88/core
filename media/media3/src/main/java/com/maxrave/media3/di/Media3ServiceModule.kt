@@ -1,6 +1,8 @@
 package com.maxrave.media3.di
 
 import android.app.Activity
+import com.maxrave.common.PlaybackPlatformPolicy
+import com.maxrave.common.isTelevisionDevice
 import android.content.Context
 import android.content.Context.BIND_AUTO_CREATE
 import android.content.Intent
@@ -139,7 +141,7 @@ private val mediaServiceModule =
             provideSimpleCache(
                 context = androidContext(),
                 cacheName = "spotifyCanvas",
-                cacheSize = -1,
+                cacheSize = PlaybackPlatformPolicy.forDevice(androidContext().isTelevisionDevice()).canvasLimitMiB,
                 databaseProvider = get<DatabaseProvider>(),
             )
         }
@@ -541,6 +543,11 @@ private fun provideCacheDataSource(
             CacheDataSource
                 .Factory()
                 .setCache(playerCache)
+                .apply {
+                    if (!PlaybackPlatformPolicy.forDevice(context.isTelevisionDevice()).streamingDiskWrites) {
+                        setCacheWriteDataSinkFactory(null)
+                    }
+                }
                 .setUpstreamDataSourceFactory(provideHttpDataSourceFactory(context, proxy)),
         ).setCacheWriteDataSinkFactory(null)
         .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
