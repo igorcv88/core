@@ -8,6 +8,8 @@ import com.maxrave.domain.data.player.GenericCastState
 import com.maxrave.domain.data.player.GenericCommandButton
 import com.maxrave.domain.data.player.GenericMediaItem
 import com.maxrave.domain.data.player.PlayerError
+import com.maxrave.domain.data.player.RenditionSwitchToken
+import com.maxrave.domain.data.player.RenditionSwitchResult
 import com.maxrave.domain.mediaservice.player.MediaPlayerInterface
 import com.maxrave.domain.utils.isEndlessQueueId
 import kotlinx.coroutines.flow.StateFlow
@@ -16,6 +18,9 @@ import kotlinx.coroutines.flow.StateFlow
  * Handler interface for managing media playback service operations
  */
 interface MediaPlayerHandler {
+    suspend fun switchRendition(expected: RenditionSwitchToken, target: Track, musicVideo: Boolean): RenditionSwitchResult =
+        RenditionSwitchResult.Unsupported
+
     // Core player interface
     val player: MediaPlayerInterface
 

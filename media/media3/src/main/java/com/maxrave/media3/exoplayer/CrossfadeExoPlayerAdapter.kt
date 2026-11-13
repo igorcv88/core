@@ -32,6 +32,11 @@ import com.maxrave.domain.mediaservice.automix.TransitionPlan
 import com.maxrave.domain.mediaservice.automix.TransitionPlanner
 import com.maxrave.domain.data.player.PlayerConstants
 import com.maxrave.domain.data.player.PlayerError
+import com.maxrave.domain.data.player.RenditionSwitchResult
+import com.maxrave.domain.data.player.RenditionSwitchToken
+import com.maxrave.domain.data.player.RenditionSwitchSnapshot
+import com.maxrave.domain.data.player.renditionPosition
+import com.maxrave.domain.data.player.canReuseRenditionSource
 import com.maxrave.domain.extension.isVideo
 import com.maxrave.domain.manager.DataStoreManager
 import com.maxrave.domain.mediaservice.player.MediaPlayerInterface
@@ -55,6 +60,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -97,6 +106,130 @@ internal class CrossfadeExoPlayerAdapter(
     private val streamRepository: StreamRepository,
     private val waveformReader: WaveformReader,
 ) : MediaPlayerInterface {
+    private val _activeVideo = MutableStateFlow<Boolean?>(null)
+    override val activeVideo: StateFlow<Boolean?> = _activeVideo
+    private var renditionSwitchPending = false
+    private var renditionCandidate: ExoPlayer? = null
+    private var released = false
+    private var sourceRevision = 0L
+    override val playbackRevision: Long get() = sourceRevision
+
+    override suspend fun switchRendition(
+        expected: RenditionSwitchToken,
+        target: GenericMediaItem,
+        musicVideo: Boolean,
+        targetDurationMs: Long?,
+        onCommit: (queueIndex: Int) -> Boolean,
+    ): RenditionSwitchResult = withContext(coroutineScope.coroutineContext.minusKey(Job)) {
+        if (released) return@withContext RenditionSwitchResult.Unsupported
+        if (renditionSwitchPending) return@withContext RenditionSwitchResult.Busy
+        if (!expected.matches(localCurrentMediaItemIndex, currentMediaItem, sourceRevision)) return@withContext RenditionSwitchResult.Stale
+        if (isCastActive || LiveStreamRegistry.isLive(expected.item.mediaId) || LiveStreamRegistry.isLive(target.mediaId)) {
+            return@withContext RenditionSwitchResult.Unsupported
+        }
+        if (!mediaSourceFactory.canSwitchRendition()) return@withContext RenditionSwitchResult.Unsupported
+        renditionSwitchPending = true
+        var candidate: ExoPlayer? = null
+        var committed = false
+        try {
+            // UI index/position already describe incoming A+1. Keep that owner before preparing.
+            if (isCrossfading) {
+                commitIncomingAsCurrentInternal()
+                startPositionUpdates()
+            }
+            val originalPlayer = currentPlayer ?: return@withContext RenditionSwitchResult.Unavailable
+            val snapshot = RenditionSwitchSnapshot(expected, playlist.toList(), shuffleOrder.toList(), internalShuffleModeEnabled, internalRepeatMode)
+            fun stillCurrent(): Boolean =
+                !released && snapshot.matches(localCurrentMediaItemIndex, currentMediaItem, sourceRevision, playlist, shuffleOrder, internalShuffleModeEnabled, internalRepeatMode) &&
+                    currentPlayer === originalPlayer && !isCastActive && !isCrossfading &&
+                    !LiveStreamRegistry.isLive(expected.item.mediaId) && !LiveStreamRegistry.isLive(target.mediaId)
+
+            val prepared = createExoPlayerInstance(target.mediaId)
+            candidate = prepared.player
+            renditionCandidate = candidate
+            val ready = CompletableDeferred<Boolean>()
+            val proof = object : Player.Listener {
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (playbackState == Player.STATE_READY) ready.complete(true)
+                }
+                override fun onPlayerError(error: PlaybackException) { ready.complete(false) }
+            }
+            candidate.addListener(proof)
+            candidate.playWhenReady = false
+            candidate.setMediaSource(mediaSourceFactory.createRenditionSource(target.toMedia3MediaItem(), musicVideo))
+            candidate.prepare()
+            val playable = withTimeoutOrNull(20_000) { ready.await() } == true
+            candidate.removeListener(proof)
+            if (!stillCurrent()) return@withContext RenditionSwitchResult.Stale
+            if (!mediaSourceFactory.canSwitchRendition()) return@withContext RenditionSwitchResult.Unsupported
+            if (!playable || candidate.playerError != null ||
+                !candidate.currentTracks.isTypeSelected(C.TRACK_TYPE_AUDIO) ||
+                candidate.currentTracks.isTypeSelected(C.TRACK_TYPE_VIDEO) != musicVideo
+            ) return@withContext RenditionSwitchResult.Failed
+
+            // Pause/seek during lookup and preparation remain authoritative. No suspension follows.
+            val position = renditionPosition(originalPlayer.currentPosition, candidate.duration.takeIf { it > 0 } ?: targetDurationMs)
+            val shouldPlay = internalPlayWhenReady
+            candidate.volume = internalVolume
+            candidate.playbackParameters = PlaybackParameters(internalPlaybackSpeed, internalPlaybackPitch)
+            candidate.skipSilenceEnabled = internalSkipSilence
+            candidate.seekTo(position)
+            val visibleIndex = if (internalShuffleModeEnabled) shuffleOrder.indexOf(expected.index) else expected.index
+            // Delegate/surface transfer can throw. Keep queue and adapter ownership unchanged
+            // until it succeeds, and restore the previous delegate on a refused mirror commit.
+            try {
+                forwardingPlayer.swapDelegate(candidate)
+                if (!onCommit(visibleIndex)) {
+                    forwardingPlayer.swapDelegate(originalPlayer)
+                    return@withContext RenditionSwitchResult.Stale
+                }
+            } catch (error: Exception) {
+                try {
+                    forwardingPlayer.swapDelegate(originalPlayer)
+                } catch (restoreError: Exception) {
+                    Logger.e(TAG, "Rendition delegate restoration failed", restoreError)
+                }
+                throw error
+            }
+            currentLoadJob?.cancel()
+            cancelPrecaching()
+            clearAllPrecacheInternal()
+            cleanupPlayerListenerInternal()
+            stopPositionUpdates()
+            playlist[expected.index] = target
+            sourceRevision++
+            pinnedNextItems.remove(expected.item)
+            currentPlayer = candidate
+            currentPlayerFilter = prepared.filter
+            setupPlayerListenerInternal(candidate)
+            forwardingPlayer.notifyMediaItemChanged()
+            cachedPosition = position
+            cachedDuration = candidate.duration.takeIf { it > 0 } ?: targetDurationMs ?: 0
+            _activeVideo.value = musicVideo
+            committed = true
+            originalPlayer.stop()
+            originalPlayer.release()
+            forwardingPlayer.suppressPlaybackEnded = false
+            if (shouldPlay) {
+                requestAudioFocusInternal()
+                candidate.play()
+            } else candidate.pause()
+            transitionToState(if (shouldPlay) InternalState.PLAYING else InternalState.READY)
+            startPositionUpdates()
+            triggerPrecachingInternal()
+            RenditionSwitchResult.Success
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Logger.w(TAG, "Rendition switch failed: ${error.javaClass.simpleName}")
+            RenditionSwitchResult.Failed
+        } finally {
+            if (!committed && candidate === renditionCandidate) candidate?.release()
+            renditionCandidate = null
+            renditionSwitchPending = false
+        }
+    }
+
     // ========== Internal State Enum (same as GstreamerPlayerAdapter) ==========
 
     private enum class InternalState {
@@ -434,6 +567,10 @@ internal class CrossfadeExoPlayerAdapter(
 
     private val playlist = mutableListOf<GenericMediaItem>()
     private var localCurrentMediaItemIndex = -1
+        set(value) {
+            if (field != value) sourceRevision++
+            field = value
+        }
 
     // Shuffle management
     private var shuffleIndices = mutableListOf<Int>()
@@ -517,6 +654,7 @@ internal class CrossfadeExoPlayerAdapter(
         if (remotePlayer != null) {
             if (castRemotePlayer === remotePlayer) return
             castRemotePlayer = remotePlayer
+            sourceRevision++
             Logger.w(TAG, "Cast session active on ${deviceName ?: "unknown device"} — local playback suspended")
             coroutineScope.launch {
                 // Kill anything that makes local noise or wastes battery while remote.
@@ -764,6 +902,7 @@ internal class CrossfadeExoPlayerAdapter(
             forwardingPlayer.suppressPlaybackEnded = false
             currentPlayer?.let { player ->
                 Logger.d(TAG, "Stop called")
+                sourceRevision++
                 player.stop()
                 transitionToState(InternalState.IDLE)
                 stopPositionUpdates()
@@ -1542,6 +1681,9 @@ internal class CrossfadeExoPlayerAdapter(
     // ========== Release Resources ==========
 
     override fun release() {
+        released = true
+        renditionCandidate?.release()
+        renditionCandidate = null
         // Cancel all ongoing jobs
         currentLoadJob?.cancel()
         precacheJob?.cancel()
@@ -1670,6 +1812,9 @@ internal class CrossfadeExoPlayerAdapter(
     ) {
         if (index !in playlist.indices) return
 
+        _activeVideo.value = null
+        sourceRevision++
+
         val mediaItem = playlist[index]
         val videoId = mediaItem.mediaId
 
@@ -1706,7 +1851,7 @@ internal class CrossfadeExoPlayerAdapter(
                     val cachedPlayerEntry =
                         precachedPlayers.remove(videoId)?.let { cached ->
                             cached.retryListener?.let { cached.player.removeListener(it) }
-                            if (cached.player.playerError == null) {
+                            if (cached.player.playerError == null && canReuseRenditionSource(cached.mediaItem, mediaItem)) {
                                 cached
                             } else {
                                 cached.player.release()
@@ -1982,6 +2127,7 @@ internal class CrossfadeExoPlayerAdapter(
                         return
                     }
                     val genericTracks = tracks.toGenericTracks()
+                    _activeVideo.value = tracks.isTypeSelected(C.TRACK_TYPE_VIDEO)
                     listeners.forEach { it.onTracksChanged(genericTracks) }
                 }
 
@@ -2115,10 +2261,10 @@ internal class CrossfadeExoPlayerAdapter(
      * instead of fading in under the outgoing song — so the transition takes the normal
      * (non-crossfade) path.
      */
-    private fun isNextTrackVideo(): Boolean = watchVideoEnabled && playlist.getOrNull(getNextMediaItemIndex())?.isVideo() == true
+    private fun isNextTrackVideo(): Boolean = playlist.getOrNull(getNextMediaItemIndex())?.let { (it.videoPlayback ?: watchVideoEnabled) && it.isVideo() } == true
 
     /** Same skip rule for the CURRENT track: a video should play out to its last frame instead of fading out under the incoming song. */
-    private fun isCurrentTrackVideo(): Boolean = watchVideoEnabled && currentMediaItem?.isVideo() == true
+    private fun isCurrentTrackVideo(): Boolean = _activeVideo.value ?: (watchVideoEnabled && currentMediaItem?.isVideo() == true)
 
     /** A live broadcast never reaches an end to fade out of, and its "remaining time" is only how far behind the live edge it is. */
     private fun isCurrentTrackLive(): Boolean = currentMediaItem?.mediaId?.let(LiveStreamRegistry::isLive) == true
@@ -2254,8 +2400,14 @@ internal class CrossfadeExoPlayerAdapter(
 
                 // Get or create secondary player
                 val cachedPlayerEntry =
-                    precachedPlayers.remove(nextVideoId)?.also { cached ->
+                    precachedPlayers.remove(nextVideoId)?.let { cached ->
                         cached.retryListener?.let { cached.player.removeListener(it) }
+                        if (cached.player.playerError == null && canReuseRenditionSource(cached.mediaItem, nextMediaItem)) {
+                            cached
+                        } else {
+                            cached.player.release()
+                            null
+                        }
                     }
                 val nextPlayer: ExoPlayer
                 val nextFilter: CrossfadeFilterAudioProcessor?

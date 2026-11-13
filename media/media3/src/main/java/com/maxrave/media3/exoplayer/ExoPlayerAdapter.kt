@@ -559,6 +559,7 @@ fun GenericMediaItem.toMedia3MediaItem(): MediaItem {
 
     uri?.let { builder.setUri(it) }
     customCacheKey?.let { builder.setCustomCacheKey(it) }
+    videoPlayback?.let { builder.setTag(it) }
 
     return builder.build()
 }

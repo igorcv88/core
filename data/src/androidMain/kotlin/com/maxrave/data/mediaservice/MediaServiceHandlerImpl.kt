@@ -40,8 +40,11 @@ import com.maxrave.domain.data.player.GenericMediaItem
 import com.maxrave.domain.data.player.GenericMediaMetadata
 import com.maxrave.domain.data.player.GenericPlaybackParameters
 import com.maxrave.domain.data.player.GenericTracks
+import com.maxrave.domain.data.player.LiveStreamRegistry
 import com.maxrave.domain.data.player.PlayerConstants
 import com.maxrave.domain.data.player.PlayerError
+import com.maxrave.domain.data.player.RenditionSwitchResult
+import com.maxrave.domain.data.player.RenditionSwitchToken
 import com.maxrave.domain.data.player.ReverbEffect
 import com.maxrave.domain.data.player.ReverbPreset
 import com.maxrave.domain.extension.isVideo
@@ -74,6 +77,7 @@ import com.maxrave.domain.utils.MusicVideoType
 import com.maxrave.domain.utils.Resource
 import com.maxrave.domain.utils.connectArtists
 import com.maxrave.domain.utils.isEndlessQueueId
+import com.maxrave.domain.utils.isLive
 import com.maxrave.domain.utils.toArrayListTrack
 import com.maxrave.domain.utils.toListName
 import com.maxrave.domain.utils.toSongEntity
@@ -621,7 +625,7 @@ internal class MediaServiceHandlerImpl(
         }
     }
 
-    private fun getDataOfNowPlayingState(mediaItem: GenericMediaItem) {
+    private fun getDataOfNowPlayingState(mediaItem: GenericMediaItem, renditionChange: Boolean = false) {
         val videoId =
             if (mediaItem.isVideo()) {
                 mediaItem.mediaId.removePrefix(MERGING_DATA_TYPE.VIDEO)
@@ -672,7 +676,7 @@ internal class MediaServiceHandlerImpl(
                         songRepository.updateSongInLibrary(now(), songEntity.videoId).singleOrNull().let {
                             Logger.d(TAG, "getDataOfNowPlayingState: $it")
                         }
-                        songRepository.updateListenCount(songEntity.videoId)
+                        if (!renditionChange) songRepository.updateListenCount(songEntity.videoId)
                         _nowPlayingState.update {
                             it.copy(
                                 songEntity =
@@ -684,7 +688,7 @@ internal class MediaServiceHandlerImpl(
                         updateDiscordRpc(songEntity)
                         // Launched separately: "now playing" is a network round trip, and this job
                         // still has the rest of the track state to publish.
-                        coroutineScope.launch { lastfmScrobbler.onTrackStarted(songEntity) }
+                        if (!renditionChange) coroutineScope.launch { lastfmScrobbler.onTrackStarted(songEntity) }
                     } else {
                         _controlState.update { it.copy(isLiked = false) }
                         var thumbUrl =
@@ -711,7 +715,7 @@ internal class MediaServiceHandlerImpl(
                         updateDiscordRpc(songEntity)
                         // Launched separately: "now playing" is a network round trip, and this job
                         // still has the rest of the track state to publish.
-                        coroutineScope.launch { lastfmScrobbler.onTrackStarted(songEntity) }
+                        if (!renditionChange) coroutineScope.launch { lastfmScrobbler.onTrackStarted(songEntity) }
                     }
                 }
                 songEntityJob?.cancel()
@@ -2828,6 +2832,29 @@ internal class MediaServiceHandlerImpl(
             resetCrossfade()
         }
         mayBeSaveRecentSong()
+    }
+
+    override suspend fun switchRendition(expected: RenditionSwitchToken, target: Track, musicVideo: Boolean): RenditionSwitchResult {
+        if (castState.value.isRemote || LiveStreamRegistry.isLive(expected.item.mediaId) || target.isLive) {
+            return RenditionSwitchResult.Unsupported
+        }
+        val item = target.toGenericMediaItem().let {
+            it.copy(metadata = it.metadata.copy(description = if (musicVideo) MERGING_DATA_TYPE.VIDEO else MERGING_DATA_TYPE.SONG), videoPlayback = musicVideo)
+        }
+        return player.switchRendition(expected, item, musicVideo, target.durationSeconds?.takeIf { it > 0 }?.toLong()?.times(1000)) { index ->
+            val snapshot = _queueData.value
+            if (snapshot.data.listTracks.getOrNull(index)?.videoId != expected.item.mediaId) {
+                false
+            } else {
+                val tracks = snapshot.data.listTracks.toMutableList().apply { this[index] = target }
+                _queueData.value = snapshot.copy(data = snapshot.data.copy(listTracks = tracks))
+                _nowPlaying.value = item
+                // A rendition is the same listening session. Avoid AUTO transition tracking,
+                // listen-count increment, scrobble restart and endless-radio loadMore.
+                getDataOfNowPlayingState(item, renditionChange = true)
+                true
+            }
+        }
     }
 
     private fun mayBeTrackingListeningLocal(

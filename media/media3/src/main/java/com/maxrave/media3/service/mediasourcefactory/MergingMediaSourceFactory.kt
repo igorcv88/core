@@ -58,9 +58,23 @@ internal class MergingMediaSourceFactory(
             )
         }
         Logger.w("Merging Media Source", mediaItem.mediaMetadata.description.toString())
-        val getVideo = runBlocking(Dispatchers.IO) { dataStoreManager.watchVideoInsteadOfPlayingAudio.first() } == DataStoreManager.Values.TRUE
+        val getVideo = (mediaItem.localConfiguration?.tag as? Boolean)
+            ?: (runBlocking(Dispatchers.IO) { dataStoreManager.watchVideoInsteadOfPlayingAudio.first() } == DataStoreManager.Values.TRUE)
         Logger.w("Merging Media Source", getVideo.toString())
-        if (mediaItem.mediaMetadata.description == MERGING_DATA_TYPE.VIDEO && getVideo && !isVideoUnreachable(mediaItem.mediaId)) {
+        return createSource(mediaItem, getVideo && !isVideoUnreachable(mediaItem.mediaId))
+    }
+
+    /** Explicit TV rendition intent, independent of the global preference and offline fallback. */
+    internal fun createRenditionSource(mediaItem: MediaItem, musicVideo: Boolean): MediaSource {
+        check(isOnline()) { "Rendition switching requires a network connection" }
+        check(!LiveStreamRegistry.isLive(mediaItem.mediaId)) { "Live rendition switching is unsupported" }
+        return createSource(mediaItem, musicVideo)
+    }
+
+    internal fun canSwitchRendition(): Boolean = isOnline()
+
+    private fun createSource(mediaItem: MediaItem, video: Boolean): MediaSource {
+        if (mediaItem.mediaMetadata.description == MERGING_DATA_TYPE.VIDEO && video) {
             val videoItem =
                 mediaItem
                     .buildUpon()

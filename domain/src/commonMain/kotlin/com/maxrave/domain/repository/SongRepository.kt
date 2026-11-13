@@ -14,6 +14,9 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.datetime.LocalDateTime
 
 interface SongRepository {
+    /** Only YouTube's explicit requested-ID counterpart link; null means unavailable. */
+    suspend fun getOfficialCounterpart(videoId: String, musicVideo: Boolean): Track? = null
+
     fun getAllSongs(limit: Int): Flow<List<SongEntity>>
 
     suspend fun setInLibrary(

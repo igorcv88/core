@@ -4,6 +4,7 @@ import com.maxrave.common.MERGING_DATA_TYPE
 import com.maxrave.data.db.datasource.LocalDataSource
 import com.maxrave.data.extension.getFullDataFromDB
 import com.maxrave.data.mapping.toListTrack
+import com.maxrave.data.mapping.toTrack
 import com.maxrave.data.mapping.toYouTubeComment
 import com.maxrave.data.mapping.toYouTubeCommentsPage
 import com.maxrave.data.mapping.toSongItemForDownload
@@ -63,6 +64,12 @@ internal class SongRepositoryImpl(
     private val localDataSource: LocalDataSource,
     private val youTube: YouTube,
 ) : SongRepository {
+    override suspend fun getOfficialCounterpart(videoId: String, musicVideo: Boolean): Track? =
+        withContext(Dispatchers.IO) {
+            youTube.next(WatchEndpoint(videoId = videoId)).getOrThrow()
+                .items.officialCounterpart(videoId, musicVideo)?.toTrack()
+        }
+
     override fun getAllSongs(limit: Int): Flow<List<SongEntity>> =
         flow {
             emit(localDataSource.getAllSongs(limit))

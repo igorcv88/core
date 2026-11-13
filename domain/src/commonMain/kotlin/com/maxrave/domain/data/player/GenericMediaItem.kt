@@ -8,6 +8,8 @@ data class GenericMediaItem(
     val uri: String?,
     val metadata: GenericMediaMetadata,
     val customCacheKey: String? = null,
+    /** Explicit intent for a confirmed linked rendition; null preserves the user's preference. */
+    val videoPlayback: Boolean? = null,
 ) {
     companion object {
         val EMPTY =

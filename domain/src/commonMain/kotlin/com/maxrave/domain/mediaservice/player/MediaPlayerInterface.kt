@@ -4,6 +4,8 @@ import com.maxrave.domain.data.player.AudioEffects
 import com.maxrave.domain.data.player.AudioOutput
 import com.maxrave.domain.data.player.GenericMediaItem
 import com.maxrave.domain.data.player.GenericPlaybackParameters
+import com.maxrave.domain.data.player.RenditionSwitchToken
+import com.maxrave.domain.data.player.RenditionSwitchResult
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -14,6 +16,25 @@ const val WAVEFORM_BARS_PER_SECOND = 1.25f
  * Abstract interface for media player implementations
  */
 interface MediaPlayerInterface {
+    /** Changes when ownership changes, including leaving and returning to the same queue slot. */
+    val playbackRevision: Long get() = 0
+
+    /** Null until a local source has selected tracks; metadata alone is not video confirmation. */
+    val activeVideo: StateFlow<Boolean?> get() = NO_ACTIVE_VIDEO
+
+    /**
+     * Prepare without discarding the current source, then replace exactly this queue slot.
+     * [onCommit] mirrors the visible queue inside the confirmed operation; false refuses it.
+     * Other backends refuse by default and keep existing playback behavior.
+     */
+    suspend fun switchRendition(
+        expected: RenditionSwitchToken,
+        target: GenericMediaItem,
+        musicVideo: Boolean,
+        targetDurationMs: Long?,
+        onCommit: (queueIndex: Int) -> Boolean,
+    ): RenditionSwitchResult = RenditionSwitchResult.Unsupported
+
     // Playback control
     fun play()
 
@@ -263,3 +284,4 @@ interface MediaPlayerInterface {
 
 // What a backend that cannot list its outputs reports: nothing, and never anything else.
 private val NO_AUDIO_OUTPUTS: StateFlow<List<AudioOutput>> = MutableStateFlow(emptyList())
+private val NO_ACTIVE_VIDEO: StateFlow<Boolean?> = MutableStateFlow(null)
