@@ -95,10 +95,11 @@ data class YouTubeClient(
         val WEB_EMBEDDED =
             YouTubeClient(
                 clientName = "WEB_EMBEDDED_PLAYER",
-                clientVersion = "1.20250310.01.00",
+                clientVersion = "2.20260708.00.00",
                 api_key = "AIzaSyC9XL3ZjWddXya6X74dJoCTL-WEYFDNX30",
                 userAgent = USER_AGENT_WEB,
-                referer = REFERER_YOUTUBE_MUSIC,
+                referer = "https://www.youtube.com/",
+                xClientName = 56,
             )
 
         val TVHTML5_SIMPLY =
