@@ -5,6 +5,7 @@ import com.maxrave.common.ITAG
 import com.maxrave.kotlinytmusicscraper.YouTube.Companion.DEFAULT_VISITOR_DATA
 import com.maxrave.kotlinytmusicscraper.extension.toListFormat
 import com.maxrave.kotlinytmusicscraper.extractor.ExtractSource
+import com.maxrave.kotlinytmusicscraper.extractor.embeddedDirectCandidates
 import com.maxrave.kotlinytmusicscraper.extractor.contentLengthOf
 import com.maxrave.kotlinytmusicscraper.extractor.orderByAudioTrack
 import com.maxrave.kotlinytmusicscraper.models.AccountInfo
@@ -31,6 +32,7 @@ import com.maxrave.kotlinytmusicscraper.models.WatchEndpoint
 import com.maxrave.kotlinytmusicscraper.models.YTItem
 import com.maxrave.kotlinytmusicscraper.models.YTItemType
 import com.maxrave.kotlinytmusicscraper.models.YouTubeClient
+import com.maxrave.kotlinytmusicscraper.models.YouTubeClient.Companion.WEB_EMBEDDED
 import com.maxrave.kotlinytmusicscraper.models.YouTubeClient.Companion.TVHTML5
 import com.maxrave.kotlinytmusicscraper.models.YouTubeClient.Companion.WEB
 import com.maxrave.kotlinytmusicscraper.models.YouTubeClient.Companion.WEB_REMIX
@@ -1371,6 +1373,52 @@ class YouTube {
         }
     }
 
+    /**
+     * A last resort for publicly playable videos that Android-VR extraction rejects, notably some
+     * made-for-kids music videos. Never supply a guessed/sibling video ID: only the exact video
+     * requested by the user can be used. The embedded client's own access decision must be OK.
+     *
+     * This conservative first tier accepts only direct HTTPS URLs with a successful HEAD probe.
+     * If YouTube supplies signatureCipher-only/SABR streams, it leaves the song unavailable
+     * rather than returning a broken stream or bypassing age/access restrictions.
+     */
+    private suspend fun publicEmbeddedFallback(
+        videoId: String,
+        playlistId: String?,
+        cpn: String,
+        original: PlayerResponse,
+    ): PlayerResponse? =
+        runCatching {
+            val response =
+                ytMusic.player(WEB_EMBEDDED, videoId, playlistId, cpn).body<PlayerResponse>()
+            if (response.playabilityStatus.status != "OK") {
+                Logger.w(TAG, "WEB_EMBEDDED refused $videoId: ${response.playabilityStatus.status}")
+                return@runCatching null
+            }
+            val streaming = response.streamingData ?: return@runCatching null
+            val audio =
+                streaming.embeddedDirectCandidates(audio = true)
+                    .firstOrNull { candidate -> !ytMusic.is403Url(requireNotNull(candidate.url)) }
+            if (audio == null) {
+                Logger.w(TAG, "WEB_EMBEDDED has no verified direct audio URL for $videoId")
+                return@runCatching null
+            }
+            val video =
+                streaming.embeddedDirectCandidates(audio = false)
+                    .firstOrNull { candidate -> !ytMusic.is403Url(requireNotNull(candidate.url)) }
+            val verifiedFormats = listOfNotNull(audio, video)
+            ExtractSource.record(videoId, "WEB_EMBEDDED · verified direct")
+            Logger.i(TAG, "WEB_EMBEDDED fallback $videoId: audio itag=${audio.itag}, video itag=${video?.itag}")
+            original.copy(
+                playabilityStatus = response.playabilityStatus,
+                streamingData = streaming.copy(formats = emptyList(), adaptiveFormats = verifiedFormats),
+                videoDetails = original.videoDetails ?: response.videoDetails,
+                playbackTracking = original.playbackTracking ?: response.playbackTracking,
+            )
+        }.onFailure {
+            Logger.w(TAG, "WEB_EMBEDDED fallback failed for $videoId: ${it::class.simpleName}")
+        }.getOrNull()
+
     suspend fun newPipePlayer(
         videoId: String,
         tempRes: PlayerResponse,
@@ -1643,7 +1691,9 @@ class YouTube {
                 return@runCatching Triple(cpn, tempRes.asLiveStream(liveHlsUrl), MediaType.Video)
             }
 
-            val response = newPipePlayer(videoId, tempRes, preferredAudioLanguage)
+            val response =
+                newPipePlayer(videoId, tempRes, preferredAudioLanguage)
+                    ?: publicEmbeddedFallback(videoId, playlistId, cpn, tempRes)
             if (response != null) {
                 decodedSigResponse = response
                 Logger.d(TAG, "YouTube Player found URL")

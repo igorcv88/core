@@ -8,6 +8,7 @@ import com.maxrave.kotlinytmusicscraper.models.WatchEndpoint
 import com.maxrave.kotlinytmusicscraper.models.YouTubeClient
 import com.maxrave.kotlinytmusicscraper.models.YouTubeClient.Companion.ANDROID
 import com.maxrave.kotlinytmusicscraper.models.YouTubeClient.Companion.IOS
+import com.maxrave.kotlinytmusicscraper.models.YouTubeClient.Companion.WEB_EMBEDDED
 import com.maxrave.kotlinytmusicscraper.models.YouTubeClient.Companion.TVHTML5
 import com.maxrave.kotlinytmusicscraper.models.YouTubeClient.Companion.WEB_REMIX
 import com.maxrave.kotlinytmusicscraper.models.YouTubeLocale
@@ -243,7 +244,7 @@ class Ytmusic {
             pageId?.let {
                 append("X-Goog-Pageid", it)
             }
-            append("x-origin", "https://music.youtube.com")
+            append("x-origin", if (client == WEB_EMBEDDED) "https://www.youtube.com" else "https://music.youtube.com")
             if (client.referer != null && isUsingReferer) {
                 append("Referer", client.referer)
             }
@@ -472,21 +473,16 @@ class Ytmusic {
         playlistId: String?,
         cpn: String?,
         signatureTimestamp: Int? = null,
-    ) = httpClient.post("player") {
-        ytClient(client, setLogin = true)
+    ) = httpClient.post(if (client == WEB_EMBEDDED) "https://www.youtube.com/youtubei/v1/player" else "player") {
+        ytClient(client, setLogin = client != WEB_EMBEDDED)
         setBody(
             PlayerBody(
                 context =
                     client.toContext(locale, visitorData).let {
-                        if (client == TVHTML5) {
-                            it.copy(
-                                thirdParty =
-                                    Context.ThirdParty(
-                                        embedUrl = "https://www.youtube.com/watch?v=$videoId",
-                                    ),
-                            )
-                        } else {
-                            it
+                        when (client) {
+                            WEB_EMBEDDED -> it.copy(thirdParty = Context.ThirdParty(embedUrl = "https://www.youtube.com/embed/$videoId"))
+                            TVHTML5 -> it.copy(thirdParty = Context.ThirdParty(embedUrl = "https://www.youtube.com/watch?v=$videoId"))
+                            else -> it
                         }
                     },
                 videoId = videoId,
