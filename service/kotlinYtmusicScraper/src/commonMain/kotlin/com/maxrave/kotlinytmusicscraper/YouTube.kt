@@ -1406,7 +1406,10 @@ class YouTube {
             val video =
                 streaming.embeddedDirectCandidates(audio = false)
                     .firstOrNull { candidate -> !ytMusic.is403Url(requireNotNull(candidate.url)) }
-            val verifiedFormats = listOfNotNull(audio, video)
+            // StreamRepositoryImpl uses the last available format when the preferred audio itag
+            // is absent. Keep the verified audio last so that fallback cannot select a video-only
+            // stream for an audio playback request.
+            val verifiedFormats = listOfNotNull(video, audio)
             ExtractSource.record(videoId, "WEB_EMBEDDED · verified direct")
             Logger.i(TAG, "WEB_EMBEDDED fallback $videoId: audio itag=${audio.itag}, video itag=${video?.itag}")
             original.copy(
