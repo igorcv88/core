@@ -31,6 +31,8 @@ import com.maxrave.domain.data.model.streams.YouTubeWatchEndpoint
 import com.maxrave.domain.data.player.AppOnScreen
 import com.maxrave.domain.data.player.AudioEffects
 import com.maxrave.domain.data.player.DelayEffect
+import com.maxrave.domain.data.player.EightDDirection
+import com.maxrave.domain.data.player.EightDEffect
 import com.maxrave.domain.data.player.GenericCastState
 import com.maxrave.domain.data.player.GenericCommandButton
 import com.maxrave.domain.data.player.GenericMediaItem
@@ -68,6 +70,7 @@ import com.maxrave.domain.repository.SongRepository
 import com.maxrave.domain.repository.StreamRepository
 import com.maxrave.domain.utils.FilterState
 import com.maxrave.domain.utils.MusicVideoType
+import com.maxrave.domain.utils.REPLAY_MIX_PLAYLIST_ID
 import com.maxrave.domain.utils.Resource
 import com.maxrave.domain.utils.connectArtists
 import com.maxrave.domain.utils.isEndlessQueueId
@@ -485,6 +488,19 @@ class JvmMediaPlayerHandlerImpl(
                 .distinctUntilChanged()
                 .collect { effects -> player.setAudioEffects(effects) }
         }
+        backgroundScope.launch {
+            combine(
+                dataStoreManager.eightDEnabled,
+                dataStoreManager.eightDDirection,
+                dataStoreManager.eightDPeriodSeconds,
+            ) { enabled, direction, seconds ->
+                if (enabled == TRUE) {
+                    EightDEffect(EightDDirection.fromStored(direction), seconds).normalized()
+                } else {
+                    null
+                }
+            }.distinctUntilChanged().collect { player.setEightD(it) }
+        }
         normalizeVolume =
             runBlocking { dataStoreManager.normalizeVolume.first() == TRUE }
         _nowPlaying.value = player.currentMediaItem
@@ -889,6 +905,10 @@ class JvmMediaPlayerHandlerImpl(
             }
     }
 
+    /** The queue id the watch-time reports carry: none for the local Replay Mix, a made-up id. */
+    private val reportedPlaylistId: String?
+        get() = queueData.value.data.playlistId?.takeUnless { it == REPLAY_MIX_PLAYLIST_ID }
+
     private fun initPlayback(
         playback: String?,
         atr: String?,
@@ -900,7 +920,7 @@ class JvmMediaPlayerHandlerImpl(
             if (playback != null && atr != null && watchTime != null && cpn != null) {
                 watchTimeList = arrayListOf()
                 streamRepository
-                    .initPlayback(playback, atr, watchTime, cpn, queueData.value.data.playlistId)
+                    .initPlayback(playback, atr, watchTime, cpn, reportedPlaylistId)
                     .collect {
                         if (it.first == 204) {
                             Logger.d("Check initPlayback", "Success")
@@ -935,7 +955,7 @@ class JvmMediaPlayerHandlerImpl(
                                                     watchTimeUrl,
                                                     watchTimeList,
                                                     cpn,
-                                                    queueData.value.data.playlistId,
+                                                    reportedPlaylistId,
                                                 ).collect { response ->
                                                     if (response == 204) {
                                                         Logger.d("Check updateWatchTime", "Success")
@@ -949,7 +969,7 @@ class JvmMediaPlayerHandlerImpl(
                                                 .updateWatchTimeFull(
                                                     watchTimeUrl,
                                                     cpn,
-                                                    queueData.value.data.playlistId,
+                                                    reportedPlaylistId,
                                                 ).collect { response ->
                                                     if (response == 204) {
                                                         Logger.d("Check updateWatchTimeFull", "Success")
@@ -1789,7 +1809,9 @@ class JvmMediaPlayerHandlerImpl(
                         }
                 }
             }
-        } else if (runBlocking { dataStoreManager.endlessQueue.first() } == TRUE) {
+        } else if (playlistId == REPLAY_MIX_PLAYLIST_ID || runBlocking { dataStoreManager.endlessQueue.first() } == TRUE) {
+            // Replay Mix is a radio: once its list runs out it goes on with the radio of its last
+            // track, whether or not Endless queue is on.
             Logger.w(TAG, "loadMore: Endless Queue")
             val lastTrack =
                 queueData.value.data.listTracks

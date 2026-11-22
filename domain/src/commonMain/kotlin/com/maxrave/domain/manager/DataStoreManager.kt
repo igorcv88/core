@@ -2,6 +2,7 @@ package com.maxrave.domain.manager
 
 import com.maxrave.domain.data.model.discord.DiscordSession
 import com.maxrave.domain.data.model.network.ProxyConfiguration
+import com.maxrave.domain.data.player.EightDDirection
 import com.maxrave.domain.data.player.ReverbPreset
 import kotlinx.coroutines.flow.Flow
 
@@ -282,6 +283,19 @@ interface DataStoreManager {
     val reverbMix: Flow<Float>
 
     suspend fun setReverbMix(mix: Float)
+
+    val eightDEnabled: Flow<String>
+
+    suspend fun setEightDEnabled(enabled: Boolean)
+
+    val eightDDirection: Flow<String>
+
+    suspend fun setEightDDirection(direction: EightDDirection)
+
+    /** Seconds per full revolution, 3..30 in 0.5-second increments. */
+    val eightDPeriodSeconds: Flow<Float>
+
+    suspend fun setEightDPeriodSeconds(seconds: Float)
 
     val syncFollowToYouTube: Flow<String>
 
@@ -685,6 +699,23 @@ interface DataStoreManager {
         const val AI_PROVIDER_GEMINI = "gemini"
         const val AI_PROVIDER_OPENAI = "openai"
         const val AI_PROVIDER_CUSTOM_OPENAI = "custom_openai"
+
+        /**
+         * OpenAI-compatible providers the AI client has a preset base URL for, as stored setting →
+         * provider name. None has a default model, so Settings asks for a model ID.
+         */
+        val AI_PROVIDER_PRESETS: Map<String, String> =
+            linkedMapOf(
+                "openrouter" to "OpenRouter",
+                "groq" to "Groq",
+                "deepseek" to "DeepSeek",
+                "mistral" to "Mistral AI",
+                "xai" to "xAI (Grok)",
+                "together" to "Together AI",
+                "fireworks" to "Fireworks AI",
+                "cerebras" to "Cerebras",
+                "anthropic" to "Anthropic",
+            )
 
         const val LOCAL_PLAYLIST_FILTER_OLDER_FIRST = "older_first"
         const val LOCAL_PLAYLIST_FILTER_NEWER_FIRST = "newer_first"
